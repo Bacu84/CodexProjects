@@ -20,6 +20,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
+# Hardened XML parser that rejects DTDs and entity declarations to prevent
+# XML entity expansion denial-of-service attacks (e.g., billion laughs).
+def _create_safe_parser() -> ET.XMLParser:
+    """Create an XMLParser that forbids DTDs and entity expansion."""
+    return ET.XMLParser(forbid_dtd=True, forbid_entities=True)
+
+
 # Local source workbook supplied by the business user.
 WORKBOOK_PATH = Path(r"C:\Users\s.porciello\Downloads\PricingToolSchema26_FInal_IMPORT (1).xlsm")
 ROOT = Path(__file__).resolve().parent
@@ -93,7 +100,8 @@ def load_shared_strings(zf: zipfile.ZipFile) -> list[str]:
     if "xl/sharedStrings.xml" not in zf.namelist():
         return []
     strings: list[str] = []
-    for _, elem in ET.iterparse(zf.open("xl/sharedStrings.xml"), events=("end",)):
+    parser = _create_safe_parser()
+    for _, elem in ET.iterparse(zf.open("xl/sharedStrings.xml"), events=("end",), parser=parser):
         if elem.tag == MAIN_NS + "si":
             strings.append("".join((node.text or "") for node in elem.iter(MAIN_NS + "t")))
             elem.clear()
@@ -125,8 +133,9 @@ def decode_cell(elem: ET.Element, shared_strings: list[str]):
 
 def workbook_sheet_paths(zf: zipfile.ZipFile) -> dict[str, str]:
     """Map visible worksheet names to their internal OOXML file paths."""
-    workbook = ET.fromstring(zf.read("xl/workbook.xml"))
-    rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    parser = _create_safe_parser()
+    workbook = ET.fromstring(zf.read("xl/workbook.xml"), parser=parser)
+    rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"), parser=parser)
     rel_map = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
     paths: dict[str, str] = {}
     sheets = workbook.find(MAIN_NS + "sheets")
@@ -142,10 +151,11 @@ def workbook_sheet_paths(zf: zipfile.ZipFile) -> dict[str, str]:
 def table_definitions(zf: zipfile.ZipFile) -> dict[str, dict]:
     """Extract Excel table metadata so the PricingEngine table range is stable."""
     tables: dict[str, dict] = {}
+    parser = _create_safe_parser()
     for name in zf.namelist():
         if not (name.startswith("xl/tables/") and name.endswith(".xml")):
             continue
-        root = ET.fromstring(zf.read(name))
+        root = ET.fromstring(zf.read(name), parser=parser)
         table_name = root.attrib.get("name") or root.attrib.get("displayName")
         table_columns = root.find(MAIN_NS + "tableColumns")
         columns = [col.attrib.get("name", "") for col in table_columns] if table_columns is not None else []
@@ -162,13 +172,14 @@ def table_owner_sheets(zf: zipfile.ZipFile) -> dict[str, str]:
     sheet_paths = workbook_sheet_paths(zf)
     path_to_name = {path: name for name, path in sheet_paths.items()}
     owners: dict[str, str] = {}
+    parser = _create_safe_parser()
     for rel_path in zf.namelist():
         if not (rel_path.startswith("xl/worksheets/_rels/") and rel_path.endswith(".rels")):
             continue
         sheet_file = rel_path.rsplit("/", 1)[-1].replace(".rels", "")
         sheet_path = f"xl/worksheets/{sheet_file}"
         sheet_name = path_to_name.get(sheet_path, sheet_path)
-        root = ET.fromstring(zf.read(rel_path))
+        root = ET.fromstring(zf.read(rel_path), parser=parser)
         for rel in root:
             target = rel.attrib.get("Target", "")
             if "/tables/" in target or target.startswith("../tables/"):
@@ -185,7 +196,8 @@ def parse_cells(
 ) -> dict[tuple[int, int], object]:
     """Stream only the requested worksheet cells to keep memory usage controlled."""
     cells: dict[tuple[int, int], object] = {}
-    for _, elem in ET.iterparse(zf.open(sheet_path), events=("end",)):
+    parser = _create_safe_parser()
+    for _, elem in ET.iterparse(zf.open(sheet_path), events=("end",), parser=parser):
         if elem.tag == MAIN_NS + "c":
             ref = elem.attrib.get("r")
             if ref:
@@ -206,7 +218,8 @@ def parse_column_widths(zf: zipfile.ZipFile, sheet_path: str, col_count: int) ->
         if col <= col_count:
             widths[col - 1] = 210 if col in {2, 6, 7, 8, 51} else 140
 
-    for _, elem in ET.iterparse(zf.open(sheet_path), events=("end",)):
+    parser = _create_safe_parser()
+    for _, elem in ET.iterparse(zf.open(sheet_path), events=("end",), parser=parser):
         if elem.tag == MAIN_NS + "col":
             min_col = int(elem.attrib.get("min", "1"))
             max_col = int(elem.attrib.get("max", str(min_col)))
