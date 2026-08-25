@@ -2421,7 +2421,7 @@ APP_JS = r"""
     return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
   }
 
-  function forecastVolumeByFamily(indices) {
+  function forecastVolumeByFamily(indices, limit = 100) {
     const map = new Map();
     for (const rowIndex of indices) {
       const row = rows[rowIndex];
@@ -2435,10 +2435,11 @@ APP_JS = r"""
       .map((item) => ({ ...item, delta: item.linear - item.pacemaker }))
       .filter((item) => item.pacemaker || item.linear)
       .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
-      .reverse();
+      .reverse()
+      .slice(0, limit);
   }
 
-  function segmentRevenueMaterialStats(indices) {
+  function segmentRevenueMaterialStats(indices, limit = 50) {
     const map = new Map();
     for (const rowIndex of indices) {
       const row = rows[rowIndex];
@@ -2456,7 +2457,8 @@ APP_JS = r"""
         const bi = preferred.indexOf(b.segment);
         if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
         return a.segment.localeCompare(b.segment, undefined, { numeric: true });
-      });
+      })
+      .slice(0, limit);
   }
 
   function renderCharts(data) {
@@ -2645,7 +2647,7 @@ APP_JS = r"""
     }, config);
 
     const volumeRows = forecastVolumeByFamily(state.filtered);
-    const volumeChartHeight = Math.max(300, 120 + volumeRows.length * 26);
+    const volumeChartHeight = Math.min(Math.max(300, 120 + volumeRows.length * 26), 3000);
     Plotly.react("volumeDiffChart", [
       {
         type: "bar",
