@@ -71,8 +71,11 @@ def package_path(target: str) -> str:
 def normalize_key(value) -> str:
     if value is None:
         return ""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return ""
+        if value.is_integer():
+            return str(int(value))
     return str(value).strip()
 
 """Return an Excel XML value as a number when possible, otherwise text."""
