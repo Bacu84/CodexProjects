@@ -31,6 +31,13 @@ MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 PACKAGE_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
+# Resource limits to prevent denial-of-service from malicious workbooks.
+MAX_TABLE_ROWS = 100000
+MAX_TABLE_COLS = 500
+MAX_CELL_STRING_LENGTH = 10000
+MAX_FILTER_DISTINCT_VALUES = 5000
+MAX_FILTER_VALUE_LENGTH = 500
+
     """Convert an Excel column label such as 'A' or 'AK' to a 1-based index."""
 
 def col_to_idx(col: str) -> int:
@@ -59,6 +66,18 @@ def range_bounds(ref: str) -> tuple[int, int, int, int]:
     start, end = ref.split(":")
     start_col, start_row = split_cell_ref(start)
     end_col, end_row = split_cell_ref(end)
+    row_count = end_row - start_row + 1
+    col_count = end_col - start_col + 1
+    if row_count > MAX_TABLE_ROWS:
+        raise ValueError(
+            f"Table range {ref} declares {row_count} rows, exceeding the maximum of {MAX_TABLE_ROWS}. "
+            "This may indicate a malicious or corrupted workbook."
+        )
+    if col_count > MAX_TABLE_COLS:
+        raise ValueError(
+            f"Table range {ref} declares {col_count} columns, exceeding the maximum of {MAX_TABLE_COLS}. "
+            "This may indicate a malicious or corrupted workbook."
+        )
     return start_col, start_row, end_col, end_row
 
 """Normalize workbook relationship targets to zip-internal OOXML paths."""
@@ -95,7 +114,10 @@ def load_shared_strings(zf: zipfile.ZipFile) -> list[str]:
     strings: list[str] = []
     for _, elem in ET.iterparse(zf.open("xl/sharedStrings.xml"), events=("end",)):
         if elem.tag == MAIN_NS + "si":
-            strings.append("".join((node.text or "") for node in elem.iter(MAIN_NS + "t")))
+            string_value = "".join((node.text or "") for node in elem.iter(MAIN_NS + "t"))
+            if len(string_value) > MAX_CELL_STRING_LENGTH:
+                string_value = string_value[:MAX_CELL_STRING_LENGTH]
+            strings.append(string_value)
             elem.clear()
     return strings
 
@@ -108,15 +130,23 @@ def decode_cell(elem: ET.Element, shared_strings: list[str]):
 
     if cell_type == "s" and raw is not None:
         try:
-            return shared_strings[int(raw)]
+            string_value = shared_strings[int(raw)]
+            if len(string_value) > MAX_CELL_STRING_LENGTH:
+                return string_value[:MAX_CELL_STRING_LENGTH]
+            return string_value
         except (IndexError, ValueError):
             return raw
     if cell_type == "inlineStr":
         inline = elem.find(MAIN_NS + "is")
         if inline is None:
             return None
-        return "".join((node.text or "") for node in inline.iter(MAIN_NS + "t"))
+        inline_value = "".join((node.text or "") for node in inline.iter(MAIN_NS + "t"))
+        if len(inline_value) > MAX_CELL_STRING_LENGTH:
+            return inline_value[:MAX_CELL_STRING_LENGTH]
+        return inline_value
     if cell_type == "str":
+        if raw and len(raw) > MAX_CELL_STRING_LENGTH:
+            return raw[:MAX_CELL_STRING_LENGTH]
         return raw
     if cell_type == "b" and raw is not None:
         return bool(int(raw))
@@ -2202,11 +2232,26 @@ APP_JS = r"""
   }
 
   function populateFilters() {
+    const MAX_FILTER_DISTINCT_VALUES = 5000;
+    const MAX_FILTER_VALUE_LENGTH = 500;
     els.filterArea.innerHTML = "";
     for (const field of filterFields) {
-      const values = [...new Set(rows.map((row) => row[col[field]]).filter((value) => value !== null && value !== "" && value !== undefined))]
-        .map(String)
+      let values = [...new Set(rows.map((row) => row[col[field]]).filter((value) => value !== null && value !== "" && value !== undefined))];
+      
+      // Limit the number of distinct values to prevent DOM exhaustion.
+      if (values.length > MAX_FILTER_DISTINCT_VALUES) {
+        console.warn(`Filter field "${field}" has ${values.length} distinct values, truncating to ${MAX_FILTER_DISTINCT_VALUES}.`);
+        values = values.slice(0, MAX_FILTER_DISTINCT_VALUES);
+      }
+      
+      values = values
+        .map((value) => {
+          const str = String(value);
+          // Truncate excessively long filter values to prevent memory exhaustion.
+          return str.length > MAX_FILTER_VALUE_LENGTH ? str.substring(0, MAX_FILTER_VALUE_LENGTH) + "…" : str;
+        })
         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      
       const wrapper = document.createElement("div");
       wrapper.className = "field";
       const safeId = filterId(field);
