@@ -1330,6 +1330,11 @@ APP_JS = r"""
   let saveDebounceTimer = null;
   let saveStatusTimer = null;
   let pricingDbPromise = null;
+  // Security limits: prevent unbounded saved-price imports from freezing the browser tab.
+  // Maximum file size for imported JSON files (10 MB).
+  const MAX_IMPORT_FILE_SIZE = 10 * 1024 * 1024;
+  // Maximum number of rows in a saved payload (10x typical dataset size).
+  const MAX_SAVED_ROWS = 100000;
   const state = {
     filters: {},
     search: "",
@@ -1489,6 +1494,11 @@ APP_JS = r"""
     if (!raw) return null;
     const source = Array.isArray(raw) ? { rows: raw } : raw;
     if (!Array.isArray(source.rows)) return null;
+    // Enforce row count limit to prevent browser tab freeze/crash.
+    if (source.rows.length > MAX_SAVED_ROWS) {
+      console.warn(`Saved payload exceeds maximum row count (${source.rows.length} > ${MAX_SAVED_ROWS}). Truncating.`);
+      source.rows = source.rows.slice(0, MAX_SAVED_ROWS);
+    }
     return {
       version: source.version || 2,
       sourceFile: source.sourceFile || payload.sourceFile || "",
@@ -1742,6 +1752,10 @@ APP_JS = r"""
   async function importSavedPricesFile(file) {
     if (!file) return;
     try {
+      // Enforce file size limit to prevent browser tab freeze/crash.
+      if (file.size > MAX_IMPORT_FILE_SIZE) {
+        throw new Error(`File size (${(file.size / 1024 / 1024).toFixed(1)} MB) exceeds maximum allowed size (${MAX_IMPORT_FILE_SIZE / 1024 / 1024} MB).`);
+      }
       const imported = normalizeSavedPayload(JSON.parse(await file.text()));
       if (!imported) throw new Error("Invalid saved price file.");
       imported.savedAt = new Date().toISOString();
