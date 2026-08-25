@@ -3241,8 +3241,12 @@ def write_html(payload: dict) -> None:
     The output includes local CSS, local Plotly JavaScript, the workbook-derived
     JSON payload, and the app JavaScript. There are no external script links.
     """
-    data_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).replace("</", "<\\/")
-    plotly_js = PLOTLY_PATH.read_text(encoding="utf-8").replace("</", "<\\/")
+        # Escape < and > as Unicode escapes to prevent HTML injection.
+    # This defends against case-insensitive script end tags (</script>, </SCRIPT>, </ScRiPt>, etc.)
+    # and other HTML tags that could break out of the script element context.
+    # The escapes are valid JSON and will be correctly parsed by JSON.parse().
+    data_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).replace("<", "\\u003c").replace(">", "\\u003e")
+    plotly_js = PLOTLY_PATH.read_text(encoding="utf-8").replace("<", "\\u003c").replace(">", "\\u003e")
     html = (
         HTML_SHELL_TOP
         + STYLE
