@@ -71,8 +71,11 @@ def package_path(target: str) -> str:
 def normalize_key(value) -> str:
     if value is None:
         return ""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return ""
+        if value.is_integer():
+            return str(int(value))
     return str(value).strip()
 
 """Return an Excel XML value as a number when possible, otherwise text."""
@@ -83,7 +86,9 @@ def numeric_or_text(raw: str | None):
         value = float(raw)
     except ValueError:
         return raw
-    if math.isfinite(value) and value.is_integer():
+    if not math.isfinite(value):
+        return raw
+    if value.is_integer():
         return int(value)
     return value
 
@@ -282,7 +287,7 @@ def extract_projected_nsv(zf: zipfile.ZipFile, shared_strings: list[str]) -> dic
     for row in range(first_row, last_row + 1):
         key = normalize_key(cells.get((row, trend_col)))
         value = cells.get((row, projected_col))
-        if key and isinstance(value, (int, float)):
+        if key and isinstance(value, (int, float)) and math.isfinite(value):
             projected[key] = float(value)
     return projected
 
@@ -294,7 +299,7 @@ def extract_cogs_rate_sum(zf: zipfile.ZipFile, shared_strings: list[str]) -> flo
     rows = {2, 3, 4}
     cols = {col_to_idx("AK")}
     cells = parse_cells(zf, cogs_path, shared_strings, rows, cols)
-    return sum(float(value or 0) for value in cells.values() if isinstance(value, (int, float)))
+    return sum(float(value or 0) for value in cells.values() if isinstance(value, (int, float)) and math.isfinite(value))
 
 
 def excel_div_minus_one(num: float, den: float) -> float:
@@ -308,7 +313,8 @@ def as_num(value) -> float:
         return float(value)
     try:
         cleaned = str(value).replace("%", "").replace(",", "").strip()
-        return float(cleaned)
+        result = float(cleaned)
+        return result if math.isfinite(result) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
@@ -322,7 +328,8 @@ def strict_num(value) -> float:
         cleaned = str(value).replace("%", "").replace(",", "").strip()
         if not cleaned:
             return math.nan
-        return float(cleaned)
+        result = float(cleaned)
+        return result if math.isfinite(result) else math.nan
     except (TypeError, ValueError):
         return math.nan
 
@@ -523,7 +530,10 @@ def qa_recalc(rows: list[list], projected_base: list[float], headers: list[str],
         calc = recalc_for_qa(row, base, idx, u10, cogs_rate)
         for field in fields:
             diff = abs(calc[field] - as_num(row[idx[field]]))
-            if math.isfinite(diff):
+            if not math.isfinite(diff):
+                # Non-finite differences indicate invalid input data
+                max_diffs[field] = max(max_diffs[field], float('inf'))
+            else:
                 max_diffs[field] = max(max_diffs[field], diff)
     return ", ".join(f"{field}: {diff:.6g}" for field, diff in max_diffs.items())
 
@@ -3241,7 +3251,7 @@ def write_html(payload: dict) -> None:
     The output includes local CSS, local Plotly JavaScript, the workbook-derived
     JSON payload, and the app JavaScript. There are no external script links.
     """
-    data_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).replace("</", "<\\/")
+    data_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False).replace("</", "<\\/")
     plotly_js = PLOTLY_PATH.read_text(encoding="utf-8").replace("</", "<\\/")
     html = (
         HTML_SHELL_TOP
