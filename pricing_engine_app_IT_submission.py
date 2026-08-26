@@ -1977,9 +1977,20 @@ APP_JS = r"""
     labelEl.textContent = count && count !== totalCount ? `${count} selected` : "All";
   }
 
+  function filterKey(value) {
+    if (value === null || value === undefined || value === "") return "";
+    const stringValue = String(value);
+    // Escape the sentinel marker to prevent collision with user data
+    if (stringValue === "__NO_FILTER_MATCH__") return "__ESCAPED__NO_FILTER_MATCH__";
+    return stringValue;
+  }
+
   function columnFilterKey(value) {
     if (value === null || value === undefined || value === "") return "";
-    return String(value);
+    const stringValue = String(value);
+    // Escape the sentinel marker to prevent collision with user data
+    if (stringValue === "__NO_COLUMN_MATCH__") return "__ESCAPED__NO_COLUMN_MATCH__";
+    return stringValue;
   }
 
   function columnFilterLabel(value, header) {
@@ -2020,7 +2031,7 @@ APP_JS = r"""
     const row = rows[rowIndex];
     for (const field of filterFields) {
       const selected = selectedValues(field);
-      if (selected.length && !selected.includes(String(row[col[field]]))) return false;
+      if (selected.length && !selected.includes(filterKey(row[col[field]]))) return false;
     }
     if (state.minRevenue && toNum(row[col["Revenue @Forecast New Price Pacemaker"]]) < state.minRevenue) return false;
     if (state.search.trim()) {
@@ -2225,9 +2236,10 @@ APP_JS = r"""
       ` : "";
       const options = values.map((value, index) => {
         const optionId = `filter-${safeId}-${index}`;
+        const key = filterKey(value);
         return `
           <label class="multi-option" for="${optionId}" title="${escapeHtml(value)}">
-            <input id="${optionId}" type="checkbox" value="${escapeHtml(value)}">
+            <input id="${optionId}" type="checkbox" value="${escapeHtml(key)}">
             <span>${escapeHtml(value)}</span>
           </label>
         `;
