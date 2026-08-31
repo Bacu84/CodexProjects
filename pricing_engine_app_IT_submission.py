@@ -31,6 +31,43 @@ MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 PACKAGE_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
+# Resource limits to prevent denial-of-service from malicious or corrupted workbooks
+MAX_DECOMPRESSED_SIZE = 100 * 1024 * 1024  # 100 MB per ZIP member
+MAX_SHARED_STRINGS = 1_000_000  # Maximum number of shared strings
+MAX_XML_ELEMENTS = 10_000_000  # Maximum XML elements per iterparse operation
+MAX_ZIP_ENTRIES = 10_000  # Maximum number of ZIP entries to process
+MAX_TABLE_DEFINITIONS = 1_000  # Maximum number of table definitions
+
+
+class ResourceLimitExceeded(Exception):
+    """Raised when a workbook exceeds resource consumption limits."""
+    pass
+
+
+def safe_read_zip_member(zf: zipfile.ZipFile, member_name: str, max_size: int = MAX_DECOMPRESSED_SIZE) -> bytes:
+    """Read a ZIP member with decompressed size validation to prevent compression bombs."""
+    info = zf.getinfo(member_name)
+    if info.file_size > max_size:
+        raise ResourceLimitExceeded(
+            f"ZIP member '{member_name}' decompressed size {info.file_size} exceeds limit {max_size}"
+        )
+    data = zf.read(member_name)
+    if len(data) > max_size:
+        raise ResourceLimitExceeded(
+            f"ZIP member '{member_name}' actual decompressed size {len(data)} exceeds limit {max_size}"
+        )
+    return data
+
+
+def validate_zip_entry_count(zf: zipfile.ZipFile, max_entries: int = MAX_ZIP_ENTRIES) -> None:
+    """Validate that the ZIP archive does not contain an excessive number of entries."""
+    entry_count = len(zf.namelist())
+    if entry_count > max_entries:
+        raise ResourceLimitExceeded(
+            f"ZIP archive contains {entry_count} entries, exceeding limit {max_entries}"
+        )
+
+
     """Convert an Excel column label such as 'A' or 'AK' to a 1-based index."""
 
 def col_to_idx(col: str) -> int:
@@ -96,8 +133,18 @@ def load_shared_strings(zf: zipfile.ZipFile) -> list[str]:
     if "xl/sharedStrings.xml" not in zf.namelist():
         return []
     strings: list[str] = []
+    element_count = 0
     for _, elem in ET.iterparse(zf.open("xl/sharedStrings.xml"), events=("end",)):
+        element_count += 1
+        if element_count > MAX_XML_ELEMENTS:
+            raise ResourceLimitExceeded(
+                f"Shared strings XML exceeded {MAX_XML_ELEMENTS} element limit"
+            )
         if elem.tag == MAIN_NS + "si":
+            if len(strings) >= MAX_SHARED_STRINGS:
+                raise ResourceLimitExceeded(
+                    f"Shared strings count exceeded {MAX_SHARED_STRINGS} limit"
+                )
             strings.append("".join((node.text or "") for node in elem.iter(MAIN_NS + "t")))
             elem.clear()
     return strings
@@ -128,8 +175,8 @@ def decode_cell(elem: ET.Element, shared_strings: list[str]):
 
 def workbook_sheet_paths(zf: zipfile.ZipFile) -> dict[str, str]:
     """Map visible worksheet names to their internal OOXML file paths."""
-    workbook = ET.fromstring(zf.read("xl/workbook.xml"))
-    rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    workbook = ET.fromstring(safe_read_zip_member(zf, "xl/workbook.xml"))
+    rels = ET.fromstring(safe_read_zip_member(zf, "xl/_rels/workbook.xml.rels"))
     rel_map = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
     paths: dict[str, str] = {}
     sheets = workbook.find(MAIN_NS + "sheets")
@@ -145,10 +192,16 @@ def workbook_sheet_paths(zf: zipfile.ZipFile) -> dict[str, str]:
 def table_definitions(zf: zipfile.ZipFile) -> dict[str, dict]:
     """Extract Excel table metadata so the PricingEngine table range is stable."""
     tables: dict[str, dict] = {}
+    table_count = 0
     for name in zf.namelist():
         if not (name.startswith("xl/tables/") and name.endswith(".xml")):
             continue
-        root = ET.fromstring(zf.read(name))
+        table_count += 1
+        if table_count > MAX_TABLE_DEFINITIONS:
+            raise ResourceLimitExceeded(
+                f"Table definition count exceeded {MAX_TABLE_DEFINITIONS} limit"
+            )
+        root = ET.fromstring(safe_read_zip_member(zf, name))
         table_name = root.attrib.get("name") or root.attrib.get("displayName")
         table_columns = root.find(MAIN_NS + "tableColumns")
         columns = [col.attrib.get("name", "") for col in table_columns] if table_columns is not None else []
@@ -171,7 +224,7 @@ def table_owner_sheets(zf: zipfile.ZipFile) -> dict[str, str]:
         sheet_file = rel_path.rsplit("/", 1)[-1].replace(".rels", "")
         sheet_path = f"xl/worksheets/{sheet_file}"
         sheet_name = path_to_name.get(sheet_path, sheet_path)
-        root = ET.fromstring(zf.read(rel_path))
+        root = ET.fromstring(safe_read_zip_member(zf, rel_path))
         for rel in root:
             target = rel.attrib.get("Target", "")
             if "/tables/" in target or target.startswith("../tables/"):
@@ -188,7 +241,13 @@ def parse_cells(
 ) -> dict[tuple[int, int], object]:
     """Stream only the requested worksheet cells to keep memory usage controlled."""
     cells: dict[tuple[int, int], object] = {}
+    element_count = 0
     for _, elem in ET.iterparse(zf.open(sheet_path), events=("end",)):
+        element_count += 1
+        if element_count > MAX_XML_ELEMENTS:
+            raise ResourceLimitExceeded(
+                f"Worksheet '{sheet_path}' exceeded {MAX_XML_ELEMENTS} element limit"
+            )
         if elem.tag == MAIN_NS + "c":
             ref = elem.attrib.get("r")
             if ref:
@@ -209,7 +268,13 @@ def parse_column_widths(zf: zipfile.ZipFile, sheet_path: str, col_count: int) ->
         if col <= col_count:
             widths[col - 1] = 210 if col in {2, 6, 7, 8, 51} else 140
 
+    element_count = 0
     for _, elem in ET.iterparse(zf.open(sheet_path), events=("end",)):
+        element_count += 1
+        if element_count > MAX_XML_ELEMENTS:
+            raise ResourceLimitExceeded(
+                f"Worksheet '{sheet_path}' exceeded {MAX_XML_ELEMENTS} element limit during column width parsing"
+            )
         if elem.tag == MAIN_NS + "col":
             min_col = int(elem.attrib.get("min", "1"))
             max_col = int(elem.attrib.get("max", str(min_col)))
@@ -541,6 +606,9 @@ def build_payload() -> dict:
     # The .xlsm file is treated as a zip archive of XML files. Excel itself is
     # not launched and workbook macros are not executed.
     with zipfile.ZipFile(WORKBOOK_PATH) as zf:
+        # Validate ZIP structure before processing to prevent resource exhaustion
+        validate_zip_entry_count(zf)
+        
         shared_strings = load_shared_strings(zf)
         pricing = parse_pricing_engine(zf, shared_strings)
         linear_forecast = extract_linear_forecast_model(
