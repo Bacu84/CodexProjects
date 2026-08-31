@@ -2020,6 +2020,7 @@ APP_JS = r"""
     const row = rows[rowIndex];
     for (const field of filterFields) {
       const selected = selectedValues(field);
+      if (selected.includes("__NO_FILTER_MATCH__")) return false;
       if (selected.length && !selected.includes(String(row[col[field]]))) return false;
     }
     if (state.minRevenue && toNum(row[col["Revenue @Forecast New Price Pacemaker"]]) < state.minRevenue) return false;
@@ -2036,6 +2037,7 @@ APP_JS = r"""
     for (const [columnIndex, selected] of Object.entries(state.columnFilters)) {
       const index = Number(columnIndex);
       if (options.skipColumnIndex === index) continue;
+      if (selected.includes("__NO_COLUMN_MATCH__")) return false;
       if (selected.length && !selected.includes(columnFilterKey(row[index]))) return false;
     }
     return true;
